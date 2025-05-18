@@ -63,7 +63,7 @@ setInterval(async () => {
     isHandling = true;
 
     try {
-        // ✅ 修正排序：用 BigInt 比較 maxFeePerGas（不回傳 BigInt）
+        // sort by maxFeePerGas 高 → 低
         pendingUserOps.sort((a, b) => {
             const aFee = BigInt(a.maxFeePerGas);
             const bFee = BigInt(b.maxFeePerGas);
@@ -81,16 +81,14 @@ setInterval(async () => {
                     const parsed = counterInterface.parseTransaction({ data: innerData });
                     label = parsed.name;
                 }
-                console.log(`  #${idx} - nonce: ${parseInt(op.nonce)}, 呼叫: ${label}, maxFeePerGas: ${BigInt(op.maxFeePerGas)}`);
+                console.log(`  #${idx} - nonce: ${parseInt(op.nonce)}, 呼叫: ${label}, maxFeePerGas: ${BigInt(op.maxFeePerGas)} wei`);
             } catch {
                 console.log(`  #${idx} - nonce: ${parseInt(op.nonce)}, callData 無法解譯`);
             }
+            console.log(`     meta_tx_id: ${op.meta_tx_id}, meta_tx_order_id: ${op.meta_tx_order_id}, userOpsCount: ${op.userOpsCount}`);
+            console.log(`     callDataHash: ${ethers.keccak256(op.callData)}`);
         });
 
-        console.log("📦 傳送 handleOps(...) 中包含的 senders:");
-        pendingUserOps.forEach(op => {
-            console.log(`   - ${op.sender} | nonce: ${op.nonce}`);
-        });
         const userOpsArray = pendingUserOps.map(op => [
             op.sender,
             op.nonce,
@@ -119,18 +117,27 @@ setInterval(async () => {
         console.log(`📤 批次送出 ${pendingUserOps.length} 筆 UserOperation! txHash: ${tx.hash}`);
         const receipt = await tx.wait();
 
-        for (const log of receipt.logs) {
-            try {
-                const parsed = counterInterface.parseLog(log);
-                console.log(`📊 [Counter 事件] ${parsed.args.action}: ${parsed.args.newValue.toString()}`);
-            } catch {}
+        console.log(`⛽ 實際總 Gas Used: ${receipt.gasUsed.toString()} wei`);
+
+        const logs = receipt.logs.map(log => {
             try {
                 const parsed = entryPointInterface.parseLog(log);
-                if (parsed.name === "UserOpHandled") {
-                    console.log(`📣 [UserOpHandled] sender=${parsed.args.sender} 成功=${parsed.args.success} 原因=${parsed.args.reason}`);
-                }
-            } catch {}
-        }
+                return parsed.name === "UserOpHandled" ? parsed : null;
+            } catch {
+                return null;
+            }
+        }).filter(Boolean);
+
+        logs.forEach((log, i) => {
+            const sender = log.args.sender;
+            const success = log.args.success;
+            const reason = log.args.reason;
+            const op = pendingUserOps[i];  // use index to match correctly
+
+            console.log(`📣 [UserOpHandled] sender=${sender}`);
+            console.log(`     meta_tx_id: ${op.meta_tx_id}, meta_tx_order_id: ${op.meta_tx_order_id}, userOpsCount: ${op.userOpsCount}`);
+            console.log(`     success=${success}, reason=${reason}`);
+        });
 
     } catch (err) {
         console.error("❌ 批次送出失敗:", err.reason || err.message || err);

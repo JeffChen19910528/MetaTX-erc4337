@@ -30,11 +30,26 @@ contract EntryPoint {
     }
 
     function handleOps(UserOperation[] calldata ops, address beneficiary) external {
+        // 將 calldata 複製到 memory，便於排序與操作
+        UserOperation[] memory sortedOps = new UserOperation[](ops.length);
         for (uint256 i = 0; i < ops.length; i++) {
-            UserOperation memory op = ops[i]; // 使用 memory 複製，避免 calldata 解包造成的 stack 增長
-            string memory reason = "";
-            bool success = false;
-            
+            sortedOps[i] = ops[i];
+        }
+
+        // 插入排序，根據 meta_tx_order_id 升冪排列
+        for (uint256 i = 0; i < sortedOps.length; i++) {
+            for (uint256 j = i + 1; j < sortedOps.length; j++) {
+                if (sortedOps[j].meta_tx_order_id < sortedOps[i].meta_tx_order_id) {
+                    UserOperation memory temp = sortedOps[i];
+                    sortedOps[i] = sortedOps[j];
+                    sortedOps[j] = temp;
+                }
+            }
+        }
+
+        // 原子性執行全部操作，失敗則 revert 整批
+        for (uint256 i = 0; i < sortedOps.length; i++) {
+            UserOperation memory op = sortedOps[i];
             bytes32 userOpHash = keccak256(abi.encode(
                 op.sender,
                 op.nonce,
@@ -53,24 +68,23 @@ contract EntryPoint {
 
             try IWallet(op.sender).validateUserOp(op, userOpHash, 0) {
                 (bool callSuccess, bytes memory ret) = op.sender.call{gas: op.callGasLimit}(op.callData);
-                success = callSuccess;
                 if (!callSuccess) {
                     if (ret.length >= 68) {
                         assembly {
                             ret := add(ret, 0x04)
                         }
-                        reason = abi.decode(ret, (string));
+                        revert(string(abi.decode(ret, (string))));
                     } else {
-                        reason = "Execution failed";
+                        revert("Execution failed");
                     }
                 }
             } catch Error(string memory err) {
-                reason = err;
+                revert(err);
             } catch {
-                reason = "Validation failed";
+                revert("Validation failed");
             }
 
-            emit UserOpHandled(op.sender, success, reason);
+            emit UserOpHandled(op.sender, true, "");
         }
 
         if (beneficiary != address(0)) {
