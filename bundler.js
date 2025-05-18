@@ -20,8 +20,27 @@ const counterABI = [
 ];
 const walletABI = ["function execute(address target, bytes data)"];
 const entryPointABI = [
-    "function handleOps((address,uint256,bytes,bytes,uint256,uint256,uint256,uint256,uint256,bytes,bytes,uint256,uint256,uint8)[] ops, address beneficiary)",
-    "event UserOpHandled(address indexed sender, bool success, string reason)"
+    `function handleOps(
+        tuple(
+            address sender,
+            uint256 nonce,
+            bytes initCode,
+            bytes callData,
+            uint256 callGasLimit,
+            uint256 verificationGasLimit,
+            uint256 preVerificationGas,
+            uint256 maxFeePerGas,
+            uint256 maxPriorityFeePerGas,
+            bytes paymasterAndData,
+            bytes signature,
+            uint256 meta_tx_id,
+            uint256 meta_tx_order_id,
+            uint8 userOpsCount
+        )[] ops,
+        address beneficiary
+    )`,
+    "event UserOpHandled(address indexed sender, bool success, string reason)",
+    "event MetaTransactionHandled(uint256 indexed meta_tx_id, bool success)"
 ];
 
 // === 初始化
@@ -63,7 +82,6 @@ setInterval(async () => {
     isHandling = true;
 
     try {
-        // sort by maxFeePerGas 高 → 低
         pendingUserOps.sort((a, b) => {
             const aFee = BigInt(a.maxFeePerGas);
             const bFee = BigInt(b.maxFeePerGas);
@@ -119,25 +137,29 @@ setInterval(async () => {
 
         console.log(`⛽ 實際總 Gas Used: ${receipt.gasUsed.toString()} wei`);
 
-        const logs = receipt.logs.map(log => {
+        for (const log of receipt.logs) {
+            // 📊 解析 Counter 事件
+            try {
+                const parsed = counterInterface.parseLog(log);
+                console.log(`📊 [Counter 事件] ${parsed.args.action}: ${parsed.args.newValue.toString()}`);
+            } catch {}
+
+            // 📣 解析 EntryPoint 的事件
             try {
                 const parsed = entryPointInterface.parseLog(log);
-                return parsed.name === "UserOpHandled" ? parsed : null;
-            } catch {
-                return null;
-            }
-        }).filter(Boolean);
 
-        logs.forEach((log, i) => {
-            const sender = log.args.sender;
-            const success = log.args.success;
-            const reason = log.args.reason;
-            const op = pendingUserOps[i];  // use index to match correctly
-
-            console.log(`📣 [UserOpHandled] sender=${sender}`);
-            console.log(`     meta_tx_id: ${op.meta_tx_id}, meta_tx_order_id: ${op.meta_tx_order_id}, userOpsCount: ${op.userOpsCount}`);
-            console.log(`     success=${success}, reason=${reason}`);
-        });
+                if (parsed.name === "UserOpHandled") {
+                    const op = pendingUserOps.shift(); // 逐筆對應
+                    const { sender, success, reason } = parsed.args;
+                    console.log(`📣 [UserOpHandled] sender=${sender}`);
+                    console.log(`     meta_tx_id: ${op.meta_tx_id}, meta_tx_order_id: ${op.meta_tx_order_id}, userOpsCount: ${op.userOpsCount}`);
+                    console.log(`     success=${success}, reason=${reason}`);
+                } else if (parsed.name === "MetaTransactionHandled") {
+                    const { meta_tx_id, success } = parsed.args;
+                    console.log(`✅ [MetaTransactionHandled] meta_tx_id=${meta_tx_id}, success=${success}`);
+                }
+            } catch {}
+        }
 
     } catch (err) {
         console.error("❌ 批次送出失敗:", err.reason || err.message || err);

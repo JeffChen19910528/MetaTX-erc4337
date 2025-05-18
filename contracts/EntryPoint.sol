@@ -11,6 +11,7 @@ interface IWallet {
 
 contract EntryPoint {
     event UserOpHandled(address indexed sender, bool success, string reason);
+    event MetaTransactionHandled(uint256 indexed meta_tx_id, bool success);
 
     struct UserOperation {
         address sender;
@@ -36,7 +37,7 @@ contract EntryPoint {
             sortedOps[i] = ops[i];
         }
 
-        // 插入排序，根據 meta_tx_order_id 升冪排列
+        // 按 meta_tx_order_id 排序（升冪）
         for (uint256 i = 0; i < sortedOps.length; i++) {
             for (uint256 j = i + 1; j < sortedOps.length; j++) {
                 if (sortedOps[j].meta_tx_order_id < sortedOps[i].meta_tx_order_id) {
@@ -47,9 +48,13 @@ contract EntryPoint {
             }
         }
 
-        // 原子性執行全部操作，失敗則 revert 整批
+        // 預設 meta_tx_id 為第 1 筆的 id
+        uint256 meta_tx_id = sortedOps[0].meta_tx_id;
+        bool allSuccess = true;
+
         for (uint256 i = 0; i < sortedOps.length; i++) {
             UserOperation memory op = sortedOps[i];
+
             bytes32 userOpHash = keccak256(abi.encode(
                 op.sender,
                 op.nonce,
@@ -66,26 +71,37 @@ contract EntryPoint {
                 op.userOpsCount
             ));
 
+            bool opSuccess = false;
+            string memory failReason = "";
+
             try IWallet(op.sender).validateUserOp(op, userOpHash, 0) {
                 (bool callSuccess, bytes memory ret) = op.sender.call{gas: op.callGasLimit}(op.callData);
-                if (!callSuccess) {
+                if (callSuccess) {
+                    opSuccess = true;
+                } else {
                     if (ret.length >= 68) {
                         assembly {
                             ret := add(ret, 0x04)
                         }
-                        revert(string(abi.decode(ret, (string))));
+                        failReason = abi.decode(ret, (string));
                     } else {
-                        revert("Execution failed");
+                        failReason = "Execution failed";
                     }
                 }
             } catch Error(string memory err) {
-                revert(err);
+                failReason = err;
             } catch {
-                revert("Validation failed");
+                failReason = "Validation failed";
             }
 
-            emit UserOpHandled(op.sender, true, "");
+            if (!opSuccess) {
+                allSuccess = false;
+            }
+
+            emit UserOpHandled(op.sender, opSuccess, failReason);
         }
+
+        emit MetaTransactionHandled(meta_tx_id, allSuccess);
 
         if (beneficiary != address(0)) {
             payable(beneficiary).transfer(0);
