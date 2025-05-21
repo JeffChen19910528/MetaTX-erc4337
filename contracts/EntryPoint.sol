@@ -31,13 +31,11 @@ contract EntryPoint {
     }
 
     function handleOps(UserOperation[] calldata ops, address beneficiary) external {
-        // 將 calldata 複製到 memory，便於排序與操作
         UserOperation[] memory sortedOps = new UserOperation[](ops.length);
         for (uint256 i = 0; i < ops.length; i++) {
             sortedOps[i] = ops[i];
         }
 
-        // 按 meta_tx_order_id 排序（升冪）
         for (uint256 i = 0; i < sortedOps.length; i++) {
             for (uint256 j = i + 1; j < sortedOps.length; j++) {
                 if (sortedOps[j].meta_tx_order_id < sortedOps[i].meta_tx_order_id) {
@@ -48,9 +46,26 @@ contract EntryPoint {
             }
         }
 
-        // 預設 meta_tx_id 為第 1 筆的 id
         uint256 meta_tx_id = sortedOps[0].meta_tx_id;
-        bool allSuccess = true;
+
+        // 使用 try/catch 呼叫內部函數，保證 ACID 原子性
+        try this._processSortedOps(sortedOps, meta_tx_id, beneficiary) {
+            emit MetaTransactionHandled(meta_tx_id, true);
+        } catch Error(string memory err) {
+            emit MetaTransactionHandled(meta_tx_id, false);
+            revert(err);
+        } catch {
+            emit MetaTransactionHandled(meta_tx_id, false);
+            revert("MetaTransaction failed");
+        }
+    }
+
+    function _processSortedOps(
+        UserOperation[] memory sortedOps,
+        uint256 meta_tx_id,
+        address beneficiary
+    ) external {
+        require(msg.sender == address(this), "Only self-call allowed");
 
         for (uint256 i = 0; i < sortedOps.length; i++) {
             UserOperation memory op = sortedOps[i];
@@ -71,41 +86,28 @@ contract EntryPoint {
                 op.userOpsCount
             ));
 
-            bool opSuccess = false;
-            string memory failReason = "";
+            // 驗證與執行，任一失敗會直接 revert 整體流程
+            IWallet(op.sender).validateUserOp(op, userOpHash, 0);
 
-            try IWallet(op.sender).validateUserOp(op, userOpHash, 0) {
-                (bool callSuccess, bytes memory ret) = op.sender.call{gas: op.callGasLimit}(op.callData);
-                if (callSuccess) {
-                    opSuccess = true;
-                } else {
-                    if (ret.length >= 68) {
-                        assembly {
-                            ret := add(ret, 0x04)
-                        }
-                        failReason = abi.decode(ret, (string));
-                    } else {
-                        failReason = "Execution failed";
-                    }
-                }
-            } catch Error(string memory err) {
-                failReason = err;
-            } catch {
-                failReason = "Validation failed";
+            (bool callSuccess, bytes memory ret) = op.sender.call{gas: op.callGasLimit}(op.callData);
+            if (!callSuccess) {
+                string memory failReason = ret.length >= 68 ? _decodeRevertReason(ret) : "Execution failed";
+                revert(failReason);
             }
 
-            if (!opSuccess) {
-                allSuccess = false;
-            }
-
-            emit UserOpHandled(op.sender, opSuccess, failReason);
+            emit UserOpHandled(op.sender, true, "");
         }
-
-        emit MetaTransactionHandled(meta_tx_id, allSuccess);
 
         if (beneficiary != address(0)) {
-            payable(beneficiary).transfer(0);
+            payable(beneficiary).transfer(0); // 模擬獎勵行為
         }
+    }
+
+    function _decodeRevertReason(bytes memory ret) internal pure returns (string memory) {
+        assembly {
+            ret := add(ret, 0x04)
+        }
+        return abi.decode(ret, (string));
     }
 
     receive() external payable {}

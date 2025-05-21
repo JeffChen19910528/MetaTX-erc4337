@@ -11,6 +11,7 @@ const COUNTER_ADDRESS = deployInfo.counter;
 const RPC_URL = "http://localhost:8545";
 const PRIVATE_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const PORT = 3000;
+const LOG_FILE = "./revert-errors.log";
 
 // === ABI 定義 ===
 const counterABI = [
@@ -43,7 +44,6 @@ const entryPointABI = [
     "event MetaTransactionHandled(uint256 indexed meta_tx_id, bool success)"
 ];
 
-// === 初始化
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
@@ -57,7 +57,7 @@ app.use(bodyParser.json());
 let pendingUserOps = [];
 let isHandling = false;
 
-console.log("🛠️ Bundler 啟動中，使用 EntryPoint 地址:", ENTRY_POINT_ADDRESS);
+console.log("\uD83D\uDEE0\uFE0F Bundler 啟動中，使用 EntryPoint 地址:", ENTRY_POINT_ADDRESS);
 
 app.post('/', async (req, res) => {
     const { method, params } = req.body;
@@ -138,18 +138,16 @@ setInterval(async () => {
         console.log(`⛽ 實際總 Gas Used: ${receipt.gasUsed.toString()} wei`);
 
         for (const log of receipt.logs) {
-            // 📊 解析 Counter 事件
             try {
                 const parsed = counterInterface.parseLog(log);
                 console.log(`📊 [Counter 事件] ${parsed.args.action}: ${parsed.args.newValue.toString()}`);
             } catch {}
 
-            // 📣 解析 EntryPoint 的事件
             try {
                 const parsed = entryPointInterface.parseLog(log);
 
                 if (parsed.name === "UserOpHandled") {
-                    const op = pendingUserOps.shift(); // 逐筆對應
+                    const op = pendingUserOps.shift();
                     const { sender, success, reason } = parsed.args;
                     console.log(`📣 [UserOpHandled] sender=${sender}`);
                     console.log(`     meta_tx_id: ${op.meta_tx_id}, meta_tx_order_id: ${op.meta_tx_order_id}, userOpsCount: ${op.userOpsCount}`);
@@ -162,7 +160,28 @@ setInterval(async () => {
         }
 
     } catch (err) {
-        console.error("❌ 批次送出失敗:", err.reason || err.message || err);
+        const payload = err?.error?.data || err?.data?.data || err?.data;
+
+        const errorMessage = `❌ 批次送出失敗: ${err.message || err.reason || err}`;
+        fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${errorMessage}
+`, 'utf8');
+
+        if (payload && typeof payload === 'string' && payload.startsWith("0x08c379a0")) {
+            const reasonHex = "0x" + payload.slice(138);
+            try {
+                const reasonStr = ethers.toUtf8String(reasonHex);
+                console.error("🔍 Revert 原因:", reasonStr);
+
+                const logLine = `[${new Date().toISOString()}] Revert: ${reasonStr}\n`;
+                fs.appendFileSync(LOG_FILE, logLine, 'utf8');
+            } catch (e) {
+                const fallback = `[${new Date().toISOString()}] ⚠️ 解碼 revert reason 失敗，原始 payload: ${payload}\n`;
+                fs.appendFileSync(LOG_FILE, fallback, 'utf8');
+                console.error("⚠️ 解碼 revert reason 失敗，格式可能非標準 Error(string)");
+            }
+        } else if (typeof payload === 'object') {
+            console.error("⚠️ 低階 VM 錯誤物件:", JSON.stringify(payload, null, 2));
+        }
     } finally {
         console.log(`🧹 清空 pendingUserOps (${pendingUserOps.length} 筆)`);
         pendingUserOps = [];
